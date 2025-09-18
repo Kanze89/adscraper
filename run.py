@@ -4,7 +4,7 @@ run.py — Orchestrator for ikon.mn + gogo.mn + news.mn (scrapers stay unchanged
 
 What it does:
 - Runs all three scrapers (or selected ones via flags)
-- Uses your folder: C:\Users\tuguldur.kh\Downloads\adscraper-full-code
+- Uses your folder: C:/Users/tuguldur.kh/Downloads/adscraper-full-code
 - Builds an Excel with clickable links from the combined CSV
 - On Monday only: zips last 7 days of screenshots and emails ZIP + ledger + Excel
 - Optionally git commit & push (if env configured)
@@ -26,7 +26,7 @@ def import_optional(module_name: str):
         return None
 
 # ========= Paths (as requested) =========
-BASE_DIR_WIN = r"C:\Users\tuguldur.kh\Downloads\adscraper-full-code"
+BASE_DIR_WIN = os.path.abspath(r"C:\Users\tuguldur.kh\Downloads\adscraper-full-code")
 DEFAULT_OUTPUT_ROOT = os.path.abspath(os.path.join(BASE_DIR_WIN, "banner_screenshots"))
 DEFAULT_CSV_PATH    = os.path.abspath(os.path.join(BASE_DIR_WIN, "banner_tracking_combined.csv"))
 DEFAULT_LEDGER_PATH = os.path.abspath(os.path.join(BASE_DIR_WIN, "banner_master.csv"))

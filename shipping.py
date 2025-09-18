@@ -11,7 +11,7 @@ shipping.py — packaging, Excel export, email, and GitHub push.
 - Commits and pushes to Git after each run if env configured.
 
 Environment (set in Windows “User variables” or similar):
-  GIT_REPO_DIR            e.g., C:\Users\tuguldur.kh\Downloads\adscraper-full-code
+  GIT_REPO_DIR            e.g., C:/Users/tuguldur.kh/Downloads/adscraper-full-code
   GIT_REMOTE_NAME         default 'origin'
   GIT_BRANCH              default 'main'
 
@@ -128,7 +128,7 @@ def zip_last_7_days(root_screenshots: str, out_zip_path: str) -> None:
     with zipfile.ZipFile(out_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for site in ("gogo.mn", "ikon.mn", "news.mn"):
             site_root = os.path.join(root_screenshots, site)
-            if not os.path.isdir(site_root): 
+            if not os.path.isdir(site_root):
                 continue
             for day in os.listdir(site_root):
                 # day folder like YYYY-MM-DD
