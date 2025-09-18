@@ -64,8 +64,14 @@ def _file_url(local_path: str) -> str:
 
 def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
     """
-    Convert the combined CSV into XLSX with a clickable "example_link" column.
-    We DO NOT modify your scrapers; we compute relative/URL on the fly.
+    Convert the combined CSV into XLSX, making the *existing* path column
+    clickable for recipients (no local C:\ paths shown).
+
+    Rules:
+      - Display: a nice relative path like  news.mn/2025-09-18/file.png
+                 (or just filename if we can't compute rel)
+      - Hyperlink: public URL, preferring RAW GitHub if available.
+      - We do NOT modify your scrapers; only the Excel output.
     """
     wb = Workbook()
     ws = wb.active
@@ -78,49 +84,90 @@ def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
         print("[XLSX] CSV not found; created empty workbook.")
         return
 
+    # Where screenshots live locally (to compute a relative path)
     output_root = _guess_output_root()
+
+    # Public link bases (pick RAW if provided; else derive RAW from PUBLIC_BASE_URL if possible)
+    raw_base = (os.getenv("RAW_BASE_URL") or "").rstrip("/")
+    public_base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
+    if not raw_base and public_base and "/blob/" in public_base:
+        # Convert https://github.com/u/r/blob/branch  -> https://raw.githubusercontent.com/u/r/branch
+        try:
+            parts = public_base.split("/blob/")
+            left = parts[0]                      # https://github.com/<USER>/<REPO>
+            branch = parts[1]                    # <BRANCH>
+            # transform domain + path
+            after = left.replace("https://github.com/", "https://raw.githubusercontent.com/")
+            raw_base = after + "/" + branch
+        except Exception:
+            raw_base = ""  # fallback to public_base if conversion fails
+
+    # Which column should be clickable?
+    # Priority: example_path, then image_path
+    clickable_cols = ["example_path", "image_path"]
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
+        ws.append(fieldnames)  # keep the same columns; we’ll decorate one as hyperlink
 
-        out_fields = list(fieldnames)
-        if "example_link" not in out_fields:
-            out_fields.append("example_link")
-
-        ws.append(out_fields)
+        # find the path column that exists in this CSV
+        click_col_idx = None
+        click_col_name = None
+        for name in clickable_cols:
+            if name in fieldnames:
+                click_col_name = name
+                click_col_idx = fieldnames.index(name) + 1  # 1-based for Excel
+                break
 
         for row in reader:
-            # pick a local path column to build a link from (varies by scraper)
-            path_candidate = row.get("example_path") or row.get("image_path") or ""
-            link = ""
-
-            if path_candidate:
-                rel = _to_rel(path_candidate, output_root)
-                url = _public_url_from_rel(rel)
-                if url:
-                    link = url
-                else:
-                    # fallback to file:// local link
-                    link = _file_url(path_candidate)
-
+            # First append raw values
             values = [row.get(k, "") for k in fieldnames]
-            values.append(link)
             ws.append(values)
 
-        # widths + hyperlink style
-        for i, col in enumerate(out_fields, 1):
-            ws.column_dimensions[get_column_letter(i)].width = min(max(len(col) + 2, 18), 60)
+            # If we have a path column, rewrite its cell: display rel, hyperlink public URL
+            if click_col_idx:
+                original_path = row.get(click_col_name, "") or ""
+                display_text = original_path
+                hyperlink = ""
 
-        for r in range(2, ws.max_row + 1):
-            cell = ws.cell(row=r, column=len(out_fields))
-            url = str(cell.value or "")
-            if url:
-                cell.hyperlink = url
-                cell.style = "Hyperlink"
+                # Try to compute a relative path under output_root
+                if original_path:
+                    rel = _to_rel(original_path, output_root)
+                    if rel:
+                        display_text = rel  # nicer than C:\...
+                    else:
+                        # as a last resort, just show the filename
+                        try:
+                            display_text = os.path.basename(original_path)
+                        except Exception:
+                            display_text = original_path
+
+                    # Prefer RAW base (direct file bytes) if set
+                    if raw_base and rel:
+                        hyperlink = raw_base.rstrip("/") + "/" + rel.lstrip("/")
+                    elif public_base and rel:
+                        # Fall back to PUBLIC_BASE_URL (blob URLs load GitHub viewer)
+                        hyperlink = public_base.rstrip("/") + "/" + rel.lstrip("/")
+                    else:
+                        # As a last fallback (not ideal for other people),
+                        # keep a local file:// link if nothing public configured
+                        hyperlink = _file_url(original_path)
+
+                # Write back into the sheet: replace the visible text + hyperlink
+                cell = ws.cell(row=ws.max_row, column=click_col_idx)
+                cell.value = display_text
+                if hyperlink:
+                    cell.hyperlink = hyperlink
+                    cell.style = "Hyperlink"
+
+        # Make it readable
+        for i, col in enumerate(fieldnames, 1):
+            ws.column_dimensions[get_column_letter(i)].width = 30
 
     wb.save(xlsx_path)
-    print(f"[XLSX] Wrote {xlsx_path}")
+    print(f"[XLSX] Wrote {xlsx_path} with clickable '{click_col_name or 'N/A'}' links")
+
 
 def zip_last_7_days(root_screenshots: str, out_zip_path: str) -> None:
     cutoff = datetime.now().date() - timedelta(days=7)
