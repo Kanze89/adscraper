@@ -63,11 +63,9 @@ def _file_url(local_path: str) -> str:
 
 def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
     """
-    Build XLSX where we:
-      - keep your original columns (schema preserved),
-      - sanitize the visible path column (no C:\...); show relative path or filename,
-      - add a final column 'open' with a clickable hyperlink to public URL (RAW > PUBLIC > file://).
-    Looks for a path column named 'example_path' or 'image_path' (first match wins).
+    Build XLSX that hides local paths entirely:
+      - EXCLUDES 'example_path' and 'image_path' columns from output
+      - Appends an 'open' column with a clickable hyperlink per row (RAW > PUBLIC > file://)
     """
     wb = Workbook()
     ws = wb.active
@@ -106,50 +104,47 @@ def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        fieldnames = reader.fieldnames or []
+        src_fields = reader.fieldnames or []
 
-        # headers: original + 'open'
-        out_fields = list(fieldnames)
-        if "open" not in out_fields:
-            out_fields.append("open")
+        # Exclude path columns from the Excel output
+        path_cols = {"example_path", "image_path"}
+        out_fields = [c for c in src_fields if c not in path_cols]
+        # Add the 'open' column at the end
+        out_fields.append("open")
         ws.append(out_fields)
 
-        # find first path-like column we know about
-        path_cols = [c for c in ("example_path", "image_path") if c in fieldnames]
-        chosen_path_col = path_cols[0] if path_cols else None
-        chosen_path_idx = (fieldnames.index(chosen_path_col) + 1) if chosen_path_col else None  # 1-based
+        # Which source column to read path from (still read it from CSV; just not showing it)
+        chosen_path_col = None
+        for c in ("example_path", "image_path"):
+            if c in src_fields:
+                chosen_path_col = c
+                break
 
         for row in reader:
-            # base values
-            values = [row.get(k, "") for k in fieldnames]
+            # Prepare visible row values (without path columns)
+            visible_values = [row.get(c, "") for c in src_fields if c not in path_cols]
+            # Placeholder for 'open' text
+            visible_values.append("Open")
+            ws.append(visible_values)
 
-            # compute link
+            # Build hyperlink
             original_path = (row.get(chosen_path_col, "") if chosen_path_col else "") or ""
             rel = _to_rel(original_path, output_root) if original_path else ""
             public_url = best_public_url(rel)
             file_link = public_url if public_url else (_file_url(original_path) if original_path else "")
 
-            # append "Open" column
-            values.append("Open")
-            ws.append(values)
-
-            # decorate: hyperlink in last column
+            # Set hyperlink on the last cell (the 'open' column)
             open_cell = ws.cell(row=ws.max_row, column=len(out_fields))
             if file_link:
                 open_cell.hyperlink = file_link
                 open_cell.style = "Hyperlink"
 
-            # sanitize the visible path column (no local absolute paths)
-            if chosen_path_idx and original_path:
-                display = rel if rel else os.path.basename(original_path)
-                ws.cell(row=ws.max_row, column=chosen_path_idx).value = display
-
-        # set widths
+        # Tidy column widths
         for i, col in enumerate(out_fields, 1):
             ws.column_dimensions[get_column_letter(i)].width = 28
 
     wb.save(xlsx_path)
-    print(f"[XLSX] Wrote {xlsx_path} (clean 'Open' links; no local paths shown)")
+    print(f"[XLSX] Wrote {xlsx_path} (only 'open' link; no local paths shown)")
 
 
 # ---------- ZIP helpers ----------
