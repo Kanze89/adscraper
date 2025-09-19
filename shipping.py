@@ -2,16 +2,15 @@
 """
 shipping.py — packaging, Excel export, email, and GitHub push.
 
-- Builds XLSX from combined CSV with clickable links ("example_link" column).
-  It tries, in order:
-    1) PUBLIC_BASE_URL + a relative path computed from image_path (if possible)
-    2) file:// local path (works if the file is on the viewer's machine or shared drive)
-- Zips last 7 days of banner_screenshots.
-- Sends weekly email (Monday only) with zip + ledger + xlsx attached.
-- Commits and pushes to Git after each run if env configured.
+What this version does:
+- Builds XLSX with a clean last-column "Open" hyperlink per row (no local C: paths shown).
+  * The visible path column is sanitized to show a relative path or filename only.
+  * Hyperlinks prefer RAW_BASE_URL; else PUBLIC_BASE_URL; else fall back to file://
+- Adds zip_today(): create a ZIP containing only today's screenshots per site.
+- Keeps zip_last_7_days(), send_email(), git_commit_and_push().
 
-Environment (set in Windows “User variables” or similar):
-  GIT_REPO_DIR            e.g., C:/Users/tuguldur.kh/Downloads/adscraper-full-code
+Environment (Windows User variables recommended):
+  GIT_REPO_DIR            e.g., C:/Users/you/Downloads/adscraper-full-code
   GIT_REMOTE_NAME         default 'origin'
   GIT_BRANCH              default 'main'
 
@@ -23,7 +22,8 @@ Environment (set in Windows “User variables” or similar):
   MAIL_TO                 comma-separated list (e.g., "a@b.com,c@d.com")
 
   PUBLIC_BASE_URL         e.g., https://github.com/<USER>/<REPO>/blob/main
-  OUTPUT_ROOT             (optional) override root for building relative file paths
+  RAW_BASE_URL            e.g., https://raw.githubusercontent.com/<USER>/<REPO>/main  (optional but preferred)
+  OUTPUT_ROOT             (optional) local screenshots root for computing relative paths
 """
 
 import os, csv, zipfile, smtplib, mimetypes, traceback, subprocess
@@ -34,12 +34,14 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
 
+
+# ---------- helpers ----------
+
 def _guess_output_root() -> str:
-    # Prefer explicit env; else infer from typical structure
+    """Prefer explicit env; else infer a sibling 'banner_screenshots' next to this file."""
     env_root = os.getenv("OUTPUT_ROOT", "").strip()
     if env_root:
         return os.path.abspath(env_root)
-    # Fallback: assume folder next to run.py called banner_screenshots
     here = Path(__file__).resolve().parent
     candidate = here / "banner_screenshots"
     return str(candidate)
@@ -51,27 +53,21 @@ def _to_rel(path_str: str, output_root: str) -> str:
     except Exception:
         return ""
 
-def _public_url_from_rel(rel_path: str) -> str:
-    base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
-    if not base or not rel_path:
-        return ""
-    return base + "/" + rel_path.lstrip("/")
-
 def _file_url(local_path: str) -> str:
-    # Excel will open file:// links when accessible
+    # Excel will open file:// links when accessible to the viewer
     p = Path(local_path).resolve()
     return "file:///" + str(p).replace("\\", "/")
 
+
+# ---------- Excel builder (clean links, no local C: paths) ----------
+
 def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
     """
-    Convert the combined CSV into XLSX, making the *existing* path column
-    clickable for recipients (no local C:\ paths shown).
-
-    Rules:
-      - Display: a nice relative path like  news.mn/2025-09-18/file.png
-                 (or just filename if we can't compute rel)
-      - Hyperlink: public URL, preferring RAW GitHub if available.
-      - We do NOT modify your scrapers; only the Excel output.
+    Build XLSX where we:
+      - keep your original columns (schema preserved),
+      - sanitize the visible path column (no C:\...); show relative path or filename,
+      - add a final column 'open' with a clickable hyperlink to public URL (RAW > PUBLIC > file://).
+    Looks for a path column named 'example_path' or 'image_path' (first match wins).
     """
     wb = Workbook()
     ws = wb.active
@@ -84,89 +80,104 @@ def build_xlsx_from_csv(csv_path: str, xlsx_path: str) -> None:
         print("[XLSX] CSV not found; created empty workbook.")
         return
 
-    # Where screenshots live locally (to compute a relative path)
+    # Local screenshots root to compute relative paths
     output_root = _guess_output_root()
 
-    # Public link bases (pick RAW if provided; else derive RAW from PUBLIC_BASE_URL if possible)
+    # URL bases
     raw_base = (os.getenv("RAW_BASE_URL") or "").rstrip("/")
     public_base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
-    if not raw_base and public_base and "/blob/" in public_base:
-        # Convert https://github.com/u/r/blob/branch  -> https://raw.githubusercontent.com/u/r/branch
-        try:
-            parts = public_base.split("/blob/")
-            left = parts[0]                      # https://github.com/<USER>/<REPO>
-            branch = parts[1]                    # <BRANCH>
-            # transform domain + path
-            after = left.replace("https://github.com/", "https://raw.githubusercontent.com/")
-            raw_base = after + "/" + branch
-        except Exception:
-            raw_base = ""  # fallback to public_base if conversion fails
 
-    # Which column should be clickable?
-    # Priority: example_path, then image_path
-    clickable_cols = ["example_path", "image_path"]
+    # If RAW not provided but PUBLIC is a GitHub blob URL, auto-derive RAW
+    if not raw_base and public_base and "/blob/" in public_base:
+        try:
+            left, branch = public_base.split("/blob/", 1)
+            raw_base = left.replace("https://github.com/", "https://raw.githubusercontent.com/") + "/" + branch
+        except Exception:
+            pass
+
+    def best_public_url(rel_path: str) -> str:
+        if not rel_path:
+            return ""
+        if raw_base:
+            return raw_base.rstrip("/") + "/" + rel_path.lstrip("/")
+        if public_base:
+            return public_base.rstrip("/") + "/" + rel_path.lstrip("/")
+        return ""
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         fieldnames = reader.fieldnames or []
-        ws.append(fieldnames)  # keep the same columns; we’ll decorate one as hyperlink
 
-        # find the path column that exists in this CSV
-        click_col_idx = None
-        click_col_name = None
-        for name in clickable_cols:
-            if name in fieldnames:
-                click_col_name = name
-                click_col_idx = fieldnames.index(name) + 1  # 1-based for Excel
-                break
+        # headers: original + 'open'
+        out_fields = list(fieldnames)
+        if "open" not in out_fields:
+            out_fields.append("open")
+        ws.append(out_fields)
+
+        # find first path-like column we know about
+        path_cols = [c for c in ("example_path", "image_path") if c in fieldnames]
+        chosen_path_col = path_cols[0] if path_cols else None
+        chosen_path_idx = (fieldnames.index(chosen_path_col) + 1) if chosen_path_col else None  # 1-based
 
         for row in reader:
-            # First append raw values
+            # base values
             values = [row.get(k, "") for k in fieldnames]
+
+            # compute link
+            original_path = (row.get(chosen_path_col, "") if chosen_path_col else "") or ""
+            rel = _to_rel(original_path, output_root) if original_path else ""
+            public_url = best_public_url(rel)
+            file_link = public_url if public_url else (_file_url(original_path) if original_path else "")
+
+            # append "Open" column
+            values.append("Open")
             ws.append(values)
 
-            # If we have a path column, rewrite its cell: display rel, hyperlink public URL
-            if click_col_idx:
-                original_path = row.get(click_col_name, "") or ""
-                display_text = original_path
-                hyperlink = ""
+            # decorate: hyperlink in last column
+            open_cell = ws.cell(row=ws.max_row, column=len(out_fields))
+            if file_link:
+                open_cell.hyperlink = file_link
+                open_cell.style = "Hyperlink"
 
-                # Try to compute a relative path under output_root
-                if original_path:
-                    rel = _to_rel(original_path, output_root)
-                    if rel:
-                        display_text = rel  # nicer than C:\...
-                    else:
-                        # as a last resort, just show the filename
-                        try:
-                            display_text = os.path.basename(original_path)
-                        except Exception:
-                            display_text = original_path
+            # sanitize the visible path column (no local absolute paths)
+            if chosen_path_idx and original_path:
+                display = rel if rel else os.path.basename(original_path)
+                ws.cell(row=ws.max_row, column=chosen_path_idx).value = display
 
-                    # Prefer RAW base (direct file bytes) if set
-                    if raw_base and rel:
-                        hyperlink = raw_base.rstrip("/") + "/" + rel.lstrip("/")
-                    elif public_base and rel:
-                        # Fall back to PUBLIC_BASE_URL (blob URLs load GitHub viewer)
-                        hyperlink = public_base.rstrip("/") + "/" + rel.lstrip("/")
-                    else:
-                        # As a last fallback (not ideal for other people),
-                        # keep a local file:// link if nothing public configured
-                        hyperlink = _file_url(original_path)
-
-                # Write back into the sheet: replace the visible text + hyperlink
-                cell = ws.cell(row=ws.max_row, column=click_col_idx)
-                cell.value = display_text
-                if hyperlink:
-                    cell.hyperlink = hyperlink
-                    cell.style = "Hyperlink"
-
-        # Make it readable
-        for i, col in enumerate(fieldnames, 1):
-            ws.column_dimensions[get_column_letter(i)].width = 30
+        # set widths
+        for i, col in enumerate(out_fields, 1):
+            ws.column_dimensions[get_column_letter(i)].width = 28
 
     wb.save(xlsx_path)
-    print(f"[XLSX] Wrote {xlsx_path} with clickable '{click_col_name or 'N/A'}' links")
+    print(f"[XLSX] Wrote {xlsx_path} (clean 'Open' links; no local paths shown)")
+
+
+# ---------- ZIP helpers ----------
+
+def zip_today(root_screenshots: str, out_zip_path: str, sites=("gogo.mn", "ikon.mn", "news.mn"), day: str | None = None) -> bool:
+    """
+    Zip only today's (or given YYYY-MM-DD) screenshots per site into out_zip_path.
+    Returns True if a zip was created with at least one file, else False.
+    """
+    day = day or datetime.now().strftime("%Y-%m-%d")
+    os.makedirs(os.path.dirname(out_zip_path), exist_ok=True)
+    count = 0
+    with zipfile.ZipFile(out_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for site in sites:
+            folder = os.path.join(root_screenshots, site, day)
+            if not os.path.isdir(folder):
+                continue
+            for dirpath, _, filenames in os.walk(folder):
+                for fn in filenames:
+                    full = os.path.join(dirpath, fn)
+                    rel = os.path.relpath(full, root_screenshots).replace("\\", "/")
+                    zf.write(full, rel)
+                    count += 1
+    if count:
+        print(f"[ZIP] Today-only zip wrote {out_zip_path} with {count} file(s)")
+        return True
+    print("[ZIP] No files for today; zip not created")
+    return False
 
 
 def zip_last_7_days(root_screenshots: str, out_zip_path: str) -> None:
@@ -191,6 +202,9 @@ def zip_last_7_days(root_screenshots: str, out_zip_path: str) -> None:
                             rel  = os.path.relpath(full, root_screenshots)
                             zf.write(full, rel)
     print(f"[ZIP] Wrote {out_zip_path}")
+
+
+# ---------- Email + Git ----------
 
 def _attach_file(msg: EmailMessage, file_path: str):
     ctype, encoding = mimetypes.guess_type(file_path)

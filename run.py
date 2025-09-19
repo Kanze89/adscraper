@@ -99,65 +99,37 @@ def run_news(output_root: str, csv_path: str, skip_gifs: bool) -> None:
         print(f"[ERROR] news.mn scraping failed: {e}")
 
 def _send_email_report(output_root: str, combined_csv: str, xlsx_path: str, zip_path: str, ledger_path: str):
-    # Always rebuild Excel with clickable links
+    # Rebuild Excel with friendly "Open" links
     build_xlsx_from_csv(combined_csv, xlsx_path)
 
-    # Build the email body with direct links to the repo folders (no huge attachments)
-    public_base = (os.getenv("PUBLIC_BASE_URL") or "").rstrip("/")
-    # Repo path where screenshots live
-    shots_root_rel = "banner_screenshots"
-    shots_root_url = f"{public_base}/{shots_root_rel}" if public_base else ""
+    # Make a small ZIP containing only today's screenshots
+    # Use a different filename to avoid confusion with weekly zip if you keep both
+    today_zip = os.path.join(os.path.dirname(zip_path), f"banners_today_{datetime.now():%Y-%m-%d}.zip")
+    from shipping import zip_today  # if shipping.py is same module, this import is optional
+    has_zip = zip_today(output_root, today_zip)
 
-    body_lines = [
-        "Hi,",
-        "",
-        "Daily adscraper report is ready.",
-        "",
-        "Key links:",
-    ]
-    if shots_root_url:
-        body_lines.append(f"- Screenshots root: {shots_root_url}")
-        # Add last 7 days convenience links per site
-        from datetime import timedelta
-        today = datetime.now().date()
-        days = [ (today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(7) ]
-        for site in ("gogo.mn", "ikon.mn", "news.mn"):
-            body_lines.append(f"  - {site}:")
-            for d in days:
-                body_lines.append(f"    • {d}: {shots_root_url}/{site}/{d}")
-    else:
-        body_lines.append("- (PUBLIC_BASE_URL not set; screenshots links omitted)")
-        body_lines.append(f"- Local folder: {output_root}")
+    # Build email
+    subject = f"[Adscraper] Today’s report — {datetime.now():%Y-%m-%d}"
+    body = (
+        "Hi,\n\n"
+        "Attached are today's screenshots (zip), the ledger CSV, and the Excel with clickable links.\n"
+        "The Excel shows a clean 'Open' link for each banner (no local paths).\n\n"
+        "— Adscraper bot"
+    )
 
-    body_lines.extend([
-        "",
-        "Attachments:",
-        " - Excel with clickable links",
-        " - Ledger CSV",
-        "",
-        "— Adscraper bot",
-    ])
-    body = "\n".join(body_lines)
-
-    # Attach only the small files to avoid Gmail 25MB cap
     attachments = []
-    if os.path.exists(xlsx_path):
-        attachments.append(xlsx_path)
+    if has_zip and os.path.exists(today_zip):
+        # Optional size guard (~<15MB) to avoid Gmail 25MB cap
+        if (os.path.getsize(today_zip) / (1024*1024)) <= 15:
+            attachments.append(today_zip)
+        else:
+            print("[WARN] Today's zip is large; skipping attachment to avoid email size limits.")
+
     if os.path.exists(ledger_path):
         attachments.append(ledger_path)
-
-    # DO NOT attach the ZIP by default to avoid size errors.
-    # If you really want to attach it when it's small enough, uncomment below:
-    #
-    # def _mb(path): return os.path.getsize(path) / (1024 * 1024)
-    # if os.path.exists(zip_path) and _mb(zip_path) <= 15:  # keep plenty under 25MB cap
-    #     attachments.append(zip_path)
-
-    subject = f"[Adscraper] Report — {datetime.now():%Y-%m-%d}"
-    send_email(subject, body, attachments)
-
-
-
+    if os.path.exists(xlsx_path):
+        attachments.append(xlsx_path)
+    send_email(subject, body, attachments)  
 def _git_push_repo():
     repo_dir = os.getenv("GIT_REPO_DIR", BASE_DIR_WIN)
     msg = f"adscraper update {datetime.now():%Y-%m-%d %H:%M}"
